@@ -1,8 +1,9 @@
 /**
  * @file    main.c
- * @brief   This program reads the tilt register from the accelerometer when the joystick 
- *          is pushed down, then displays it on the LCD.
- * @author  Karol Wojslaw (karol.wojslaw@student.manchester.ac.uk)
+ * @brief   This program simulates  the tilt register from the accelerometer, calculates/checks the IPv4 type checksum,
+ *          creates a packet of data, stores and retrives the packet using the EEPROM memory, generates and handles
+ *          simple GUI based on an LCD and joistick.
+ * @author  Karol Wojslaw (10746230, karol.wojslaw@student.manchester.ac.uk)
  */
 
 #include "main.h"
@@ -11,16 +12,14 @@
 #include "Clk_Config.h"
 #include "LCD_Display.h"
 
+#include "Arial_9.h"
+
 #include <stdio.h>
 #include <string.h>
 
-#include "Small_7.h"
-#include "Arial_9.h"
-#include "Arial_12.h"
-#include "Arial_24.h"
-
-#define ACCELADR 0x98
-#define EEPROMADR 0xA0
+#define ACCELADR 0x98   // I2C Address of the accelerometer
+#define EEPROMADR 0xA0  // I2C Address of the EEPROM
+#define PACKET_SIZE	68	// Size of the packet in bytes
 
 /* GUI State type definition */
 typedef enum {
@@ -35,33 +34,32 @@ typedef enum {
     GUI_RETRIVED = 8      // Data retrived from the EEPROM
 } gui_state_type_t;
 
-/* Packet structure */
+/* Packet structure type definition */
 typedef struct {
-  uint32_t dest;            // Destination address (4 bytes, disp in hex). Initially 0xcccccccc
-  uint32_t src;             // Source address (4 bytes, disp in hex). Initially 0xdddddddd
-  uint16_t length;          // Length of data in the payload (2 bytes, disp in hex). Initially 56 (0x38)
+  uint32_t dest;            // Destination address (4 bytes, disp in hex)
+  uint32_t src;             // Source address (4 bytes, disp in hex)
+  uint16_t length;          // Length of data in the payload (2 bytes, disp in hex)
   uint8_t payload[54];      // Data (54 bytes, disp in bin). First byte used to store a tilt reg value
-  uint16_t checksum;        // IPv4 header type checksum (2 bytes, disp in hex). Initially 0x0000
+  uint16_t checksum;        // IPv4 header type checksum (2 bytes, disp in hex)
   uint16_t recalc_checksum; // Auxiliary checksum element for recalculated val (for comparison only)
 } packet_type_t;
 
-#define PACKET_SIZE	68		// Size of the packet in bytes
-
 /* Function declarations */
-void gpio_config(void);           // GPIO
-void i2c_1_config(void);          // I2C
-void accelerometer_config(void);  // Accelerometer
-uint8_t accelerometer_read(void);
-void joystick_config(void);       // Joystick
-void lcd_config(void);            // LCD
-void system_config(void);         // General
+void system_config(void); // General
+void gpio_config(void);   // GPIO
+void i2c_1_config(void);  // I2C
+void lcd_config(void);    // LCD
 void gui_update(gui_state_type_t state, packet_type_t packet);  // GUI
-uint16_t checksum_calculate(packet_type_t packet); // Checksum
-
+uint16_t checksum_calculate(packet_type_t packet);  // Checksum
+// Accelerometer:
+void accelerometer_config(void);  
+uint8_t accelerometer_read(void); 
+// EEPROM:
 void eeprom_write(packet_type_t *packet, uint8_t size);
 void eeprom_read(packet_type_t* packet, uint8_t size);
 void eeprom_ack_polling(void);
-
+// Joystick:
+void joystick_config(void);
 uint8_t joystick_centre(void);
 uint8_t joystick_up(void);
 uint8_t joystick_down(void);
@@ -73,19 +71,19 @@ uint8_t joystick_right(void);
 
 int main(void) {
 	/* Configuration and initialisation */
-	system_config();        // Basic
+	system_config();        // General
 	lcd_config();           // LCD
 	gpio_config();          // GPIO
 	joystick_config();      // Joystick
 	i2c_1_config();         // I2C
 	accelerometer_config(); // Accelerometer
-	
+
 	packet_type_t packet = {  // Create a packet variable (based on structure type)
 		.dest = 0xcccccccc,     // Destination address
 		.src = 0xdddddddd,      // Source address
 		.length = 54,           // Length of data in the payload
-		.checksum = 0xaa74,      // IPv4 header type checksum
-		.recalc_checksum = 0    // Checksum calculated after retriving the packet from memory (NOT STORED, for comparison)
+		.checksum = 0xaa74,     // IPv4 header type checksum
+		.recalc_checksum = 0    // Checksum calculated after retriving the packet from memory (for comparison)
 	};
 
 	for (int i=0; i<packet.length; i++) { packet.payload[i] = 0; }  // Zero-initialise the payload field in the packet
@@ -93,41 +91,38 @@ int main(void) {
 	gui_state_type_t gui_state = GUI_PAYLOAD; // Display payload value by default
 	gui_update(gui_state, packet); // Update the LCD
 
-	while (1) { //Main Loop
-	  	if(joystick_centre()) {       // Read and display tilt register value
-			packet.payload[0] = accelerometer_read(); // Read the tilt register and store the value in the payload field of the packet
-			packet.checksum = checksum_calculate(packet); // Calculate the checksum
+	while (1) { // Main Loop
+	  if(joystick_centre()) {
+		  packet.payload[0] = accelerometer_read();     // Read the tilt register and store the value in the payload field of the packet
+			packet.checksum = checksum_calculate(packet); // Calculate and update the checksum
+
 			gui_update(GUI_SAMPLED, packet);
 			gui_update(GUI_PAYLOAD, packet);
 			gui_state = GUI_PAYLOAD;
 
-		} else if(joystick_right()) { // Write 60-byte packet to EEPROM and report if successful
-			
-			// !!! TODO !!!: Write 68-byte packet to EEPROM
-			eeprom_write(&packet, PACKET_SIZE);
+		} else if(joystick_right()) {
+			eeprom_write(&packet, PACKET_SIZE); // Write 68-byte packet to the EEPROM
 
 			gui_update(GUI_WRITTEN, packet);
 			gui_update(GUI_PAYLOAD, packet);
 			gui_state = GUI_PAYLOAD;
       
-		} else if(joystick_left()) {  // Read and display 60-byte packet from the EEPROM and report if successful
-			
-			// !!! TODO !!!: Read 60-byte packet from EEPROM
-			eeprom_read(&packet, PACKET_SIZE);
+		} else if(joystick_left()) {
+			eeprom_read(&packet, PACKET_SIZE);  // Retrive the packet from EEPROM
 
 			gui_update(GUI_RETRIVED, packet);	
 			gui_update(GUI_PAYLOAD, packet);	
 			gui_state = GUI_PAYLOAD;
       
-		} else if(joystick_up()) {    // Display the next field of the packet
-			if(gui_state > 0) {gui_state--;}  // Move one state up
+		} else if(joystick_up()) {
+			if(gui_state > 0) {gui_state--;}  // Move one state up (display the next field of the packet)
 			if(gui_state == GUI_CHECKSUM_TEST) {packet.recalc_checksum = checksum_calculate(packet);} // Recalculate checksum before testing it
-			gui_update(gui_state, packet);    // Update the LCD
+			gui_update(gui_state, packet);
 
-		} else if(joystick_down()) {  // Display the previous field of the packet
-			if(gui_state < 5) {gui_state++;}  // Move one state down
+		} else if(joystick_down()) { 
+			if(gui_state < 5) {gui_state++;}  // Move one state down (display the previous field of the packet)
 			if(gui_state == GUI_CHECKSUM_TEST) {packet.recalc_checksum = checksum_calculate(packet);} // Recalculate checksum before testing it
-			gui_update(gui_state, packet);    // Update the LCD
+			gui_update(gui_state, packet);
 
 		}
   }
@@ -148,7 +143,7 @@ void system_config(void) {
  * @brief Configures GPIO pins for the mBed shield
  */
 void gpio_config(void) {
-	LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);
+	LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOA);  // Enable the clock for GPIOA (B and C) peripheral
 	LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOB);
 	LL_AHB1_GRP1_EnableClock(LL_AHB1_GRP1_PERIPH_GPIOC);
 }
@@ -162,30 +157,30 @@ void i2c_1_config(void) {
   LL_GPIO_SetAFPin_8_15(GPIOB, LL_GPIO_PIN_8, LL_GPIO_AF_4);
   LL_GPIO_SetPinOutputType(GPIOB, LL_GPIO_PIN_8, LL_GPIO_OUTPUT_OPENDRAIN);
 
-  // Configure SDA as: Alternate, High Speed, Open Drain, Pull Up
+  // Configure SDA as: Alternate function, High Speed, Open Drain, Pull Up
   LL_GPIO_SetPinMode(GPIOB, LL_GPIO_PIN_9, LL_GPIO_MODE_ALTERNATE);
   LL_GPIO_SetAFPin_8_15(GPIOB, LL_GPIO_PIN_9, LL_GPIO_AF_4);
   LL_GPIO_SetPinOutputType(GPIOB, LL_GPIO_PIN_9, LL_GPIO_OUTPUT_OPENDRAIN);
 
   // Enable I2C 1 Clock
-  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_I2C1);
-  LL_I2C_Disable(I2C1);
-  LL_I2C_SetMode(I2C1, LL_I2C_MODE_I2C);
-  LL_I2C_ConfigSpeed(I2C1, 84000000, 100000, LL_I2C_DUTYCYCLE_2); // set speed to 100 kHz
+  LL_APB1_GRP1_EnableClock(LL_APB1_GRP1_PERIPH_I2C1); // Enable the clock of I2C1 peripheral
+  LL_I2C_Disable(I2C1); // Disable the I2C line before changing its configuration
+  LL_I2C_SetMode(I2C1, LL_I2C_MODE_I2C);  // Configure I2C1 peripheral mode to the standard I2C
+  LL_I2C_ConfigSpeed(I2C1, 84000000, 100000, LL_I2C_DUTYCYCLE_2); // Set the speed to 100 kHz
   LL_I2C_Enable(I2C1);
 }
 
 /**
  * @brief Calculate IPv4 header style checksum for the packet
- * @param Packet for which the checksum has to be calculated
+ * @param packet_type_t Packet for which the checksum has to be calculated
  * @return 16-bit checksum value
  */
 uint16_t checksum_calculate(packet_type_t packet) {
-    uint16_t words[32] = {0}; // 64 bytes (32 16-bit words)
+    uint16_t words[32] = {0}; // 64 bytes (32 x 16-bit words)
 
-    words[0] = ((packet.dest & 0xffff0000) >> 16); // 4 destination bytes
+    words[0] = ((packet.dest & 0xffff0000) >> 16);  // 4 destination bytes
     words[1] = (packet.dest & 0xffff);
-    words[2] = ((packet.src & 0xffff0000) >> 16); // 4 source bytes
+    words[2] = ((packet.src & 0xffff0000) >> 16);   // 4 source bytes
     words[3] = (packet.src & 0xffff);
     words[4] = packet.length; // 2 length bytes
 
@@ -214,58 +209,58 @@ uint16_t checksum_calculate(packet_type_t packet) {
  * @param uint8_tSize of the packet in bytes
  */
 void eeprom_write(packet_type_t *packet, uint8_t size) {
-  	uint8_t byte = 0;	
+  uint8_t byte = 0;	// Currently transmitted byte
 	uint8_t page = 0;	// 32 bits per page
 
-  	while (byte < size) {
-		LL_I2C_GenerateStartCondition(I2C1);	// I2C Start
-  		while (!LL_I2C_IsActiveFlag_SB(I2C1));
+  while (byte < size) {
+		LL_I2C_GenerateStartCondition(I2C1);	  // I2C Start
+  	while (!LL_I2C_IsActiveFlag_SB(I2C1));
 
 		LL_I2C_TransmitData8(I2C1, EEPROMADR);	// Transmit EEPROM address (set R/W to 0, Write)
-  		while (!LL_I2C_IsActiveFlag_ADDR(I2C1));
-  		LL_I2C_ClearFlag_ADDR(I2C1);
+  	while (!LL_I2C_IsActiveFlag_ADDR(I2C1));
+  	LL_I2C_ClearFlag_ADDR(I2C1);
 
-  		LL_I2C_TransmitData8(I2C1, 0x00);				// Transmit Address High Byte (0x00)
-  		while (!LL_I2C_IsActiveFlag_TXE(I2C1));
+  	LL_I2C_TransmitData8(I2C1, 0x00);				// Transmit Address High Byte (0x00)
+  	while (!LL_I2C_IsActiveFlag_TXE(I2C1));
 
 		LL_I2C_TransmitData8(I2C1, (0x00 + page*32));	// Transmit Address Low Byte (increment by 32 bits with each page)
-  		while (!LL_I2C_IsActiveFlag_TXE(I2C1));
+  	while (!LL_I2C_IsActiveFlag_TXE(I2C1));
 
 		uint8_t page_end = 0;
 
-		while(!page_end && (byte < size)) {	// Transmit batches of 32 bytes until the entire packet is stored in the EEPROM
+		while(!page_end && (byte < size)) {	  // Transmit batches of 32 bytes until the entire packet is stored in the EEPROM
 			uint8_t *next_byte = (uint8_t *)(packet) + byte;
 			LL_I2C_TransmitData8(I2C1, *next_byte);  // Store the next byte of the packet
-  			while (!LL_I2C_IsActiveFlag_TXE(I2C1));
+  		while (!LL_I2C_IsActiveFlag_TXE(I2C1));
 			byte++;
-			if(byte%32 == 0) {page_end = 1;}
+			if(byte%32 == 0) {page_end = 1;}    // Check if the current page is full
 		}
 
 		LL_I2C_GenerateStopCondition(I2C1); 	// I2C Stop
-		eeprom_ack_polling();	// Acknowledge polling
+		eeprom_ack_polling();	// Poll for ack before proceeding to the next page
 		page++;
 	}
 }
 
 /**
- * @brief EEPROM Acknowledge pooling
+ * @brief Poll continuously for an acknowledge from EEPROM to check if the device is available for the next operation
  */
 void eeprom_ack_polling(void) {
-	uint8_t acknowledge_polling_cont = 1;
-	LL_I2C_ClearFlag_ADDR(I2C1);
+	uint8_t acknowledge_polling_cont = 1; // Continue polling flag
+	LL_I2C_ClearFlag_ADDR(I2C1);  // Clear the address ack flag 
 
 	while(acknowledge_polling_cont) {
-		LL_I2C_GenerateStartCondition(I2C1);	// I2C Start
-  		while (!LL_I2C_IsActiveFlag_SB(I2C1));
+		LL_I2C_GenerateStartCondition(I2C1);  // I2C Start
+  	while (!LL_I2C_IsActiveFlag_SB(I2C1));
 		
 		LL_I2C_TransmitData8(I2C1, EEPROMADR);	// Transmit EEPROM address (set R/W to 0, Write)
 		LL_mDelay(500);
 
-		if(LL_I2C_IsActiveFlag_ADDR(I2C1) == 0) {	// Check Acknowledge Failure flag
-			acknowledge_polling_cont = 1;
+		if(LL_I2C_IsActiveFlag_ADDR(I2C1) == 0) {	// Check if Acknowledge Flag hasn't been set
+			acknowledge_polling_cont = 1; // Continue polling
 		} else {
 			LL_I2C_ClearFlag_ADDR(I2C1);
-			acknowledge_polling_cont = 0;
+			acknowledge_polling_cont = 0; // Stop polling
 		}
 	}
 }
@@ -278,32 +273,32 @@ void eeprom_ack_polling(void) {
 void eeprom_read(packet_type_t* packet, uint8_t size) {
 	uint8_t byte = 0;
 
-  	LL_I2C_GenerateStartCondition(I2C1);  // I2C Start
-  	while (!LL_I2C_IsActiveFlag_SB(I2C1));
+  LL_I2C_GenerateStartCondition(I2C1);  // I2C Start
+  while (!LL_I2C_IsActiveFlag_SB(I2C1));
 
-  	LL_I2C_TransmitData8(I2C1, EEPROMADR);	// Transmit EEPROM address (set R/W to 0, Write)
-  	while (!LL_I2C_IsActiveFlag_ADDR(I2C1));
-  	LL_I2C_ClearFlag_ADDR(I2C1);
+  LL_I2C_TransmitData8(I2C1, EEPROMADR);  // Transmit EEPROM address (set R/W to 0, Write)
+  while (!LL_I2C_IsActiveFlag_ADDR(I2C1));
+  LL_I2C_ClearFlag_ADDR(I2C1);
 
-  	LL_I2C_TransmitData8(I2C1, 0x00);		// Transmit Internal Address High Byte (0x00)
-  	while (!LL_I2C_IsActiveFlag_TXE(I2C1));
+  LL_I2C_TransmitData8(I2C1, 0x00); // Transmit Internal Address High Byte (0x00)
+  while (!LL_I2C_IsActiveFlag_TXE(I2C1));
 
-	LL_I2C_TransmitData8(I2C1, (0x00));		// Transmit Internal Address Low Byte (0x00)
-  	while (!LL_I2C_IsActiveFlag_TXE(I2C1));
+	LL_I2C_TransmitData8(I2C1, (0x00)); // Transmit Internal Address Low Byte (0x00)
+  while (!LL_I2C_IsActiveFlag_TXE(I2C1));
 
-	LL_I2C_GenerateStartCondition(I2C1);  	// I2C Restart
-  	while (!LL_I2C_IsActiveFlag_SB(I2C1));
+	LL_I2C_GenerateStartCondition(I2C1);  // I2C Restart
+  while (!LL_I2C_IsActiveFlag_SB(I2C1));
 
-	LL_I2C_TransmitData8(I2C1, (EEPROMADR+1));	// Transmit EEPROM address (set R/W to 1, Read)
-  	while (!LL_I2C_IsActiveFlag_ADDR(I2C1));
-  	LL_I2C_ClearFlag_ADDR(I2C1);
+	LL_I2C_TransmitData8(I2C1, (EEPROMADR+1));  // Transmit EEPROM address (set R/W to 1, Read)
+  while (!LL_I2C_IsActiveFlag_ADDR(I2C1));
+  LL_I2C_ClearFlag_ADDR(I2C1);
 
-  	while (byte < size) {
-		uint8_t *next_byte = (uint8_t *)(packet) + byte;
-		LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_ACK);  // NACK Incoming data
-  		while (!LL_I2C_IsActiveFlag_RXNE(I2C1));
-  		*next_byte = LL_I2C_ReceiveData8(I2C1); // Store the data received and clears the RXNE flag
-		byte++;  	
+  while (byte < size) { // Retrive all the bytes in the packet
+    uint8_t *next_byte = (uint8_t *)(packet) + byte;  // Calculate the memory adress of the next byte in the array
+    LL_I2C_AcknowledgeNextData(I2C1, LL_I2C_ACK); // ACK Incoming data
+    while (!LL_I2C_IsActiveFlag_RXNE(I2C1));
+    *next_byte = LL_I2C_ReceiveData8(I2C1); // Store the data received and clears the RXNE flag
+    byte++; // Proceed to the next byte
 	}
 
 	LL_I2C_GenerateStopCondition(I2C1); // I2C Stop
@@ -333,7 +328,7 @@ void gui_update(gui_state_type_t state, packet_type_t packet) {
       Clear_Screen();  
       put_string(0, 0, "Destination:");
       char outputString[18]; // Buffer to store text in for LCD
-      sprintf(outputString, "0x%x", packet.dest);
+      sprintf(outputString, "0x%x", packet.dest); // Convert data to string
       put_string(0, 15, outputString);
       break;
     }
@@ -341,7 +336,7 @@ void gui_update(gui_state_type_t state, packet_type_t packet) {
       Clear_Screen();  
       put_string(0, 0, "Source:");
       char outputString[18]; // Buffer to store text in for LCD
-      sprintf(outputString, "0x%x", packet.src);
+      sprintf(outputString, "0x%x", packet.src); // Convert data to string
       put_string(0, 15, outputString);
       break;
     }
@@ -349,21 +344,22 @@ void gui_update(gui_state_type_t state, packet_type_t packet) {
       Clear_Screen();  
       put_string(0, 0, "Length:");
       char outputString[18]; // Buffer to store text in for LCD
-      sprintf(outputString, "0x%x", packet.length);
+      sprintf(outputString, "0x%x", packet.length); // Convert data to string
       put_string(0, 15, outputString);
       break;
     }
     case GUI_PAYLOAD: {
       Clear_Screen();
       
-      uint8_t data_bin[8];
+      uint8_t d_bin[8]; // Data in binary
       for (int j=0; j<8; j++) { // Converts 8 bits into array for display purposes
-        data_bin[j] = (packet.payload[0] & (0x80 >> j)) > 0;
+        d_bin[j] = (packet.payload[0] & (0x80 >> j)) > 0;
       }      
 
       put_string(0, 0, "Tilt Reg:");
       char outputString[18]; // Buffer to store text in for LCD
-      sprintf(outputString, "%x%x%x%x%x%x%x%x", data_bin[0], data_bin[1], data_bin[2], data_bin[3], data_bin[4], data_bin[5], data_bin[6], data_bin[7]);
+      // Convert data to string
+      sprintf(outputString, "%x%x%x%x%x%x%x%x", d_bin[0], d_bin[1], d_bin[2], d_bin[3], d_bin[4], d_bin[5], d_bin[6], d_bin[7]);
       put_string(0, 15, outputString);
       break;
     }
@@ -371,24 +367,24 @@ void gui_update(gui_state_type_t state, packet_type_t packet) {
       Clear_Screen();  
       put_string(0, 0, "Checksum:");
       char outputString[18]; // Buffer to store text in for LCD
-      sprintf(outputString, "0x%x", packet.checksum);
+      sprintf(outputString, "0x%x", packet.checksum); // Convert data to string
       put_string(0, 15, outputString);
       break;
     }
     case GUI_CHECKSUM_TEST: {
       Clear_Screen();
-      if(packet.checksum == packet.recalc_checksum) {
+      if(packet.checksum == packet.recalc_checksum) { // If the checksum is correct
         put_string(0, 0, "Checksum OK:");
         char outputString[18]; // Buffer to store text in for LCD
-        sprintf(outputString, "0x%x", packet.checksum);
+        sprintf(outputString, "0x%x", packet.checksum); // Convert data to string
         put_string(0, 15, outputString);
-      } else {
+      } else {  // If the checksum retvied is different from the recalculated one
         put_string(0, 0, "Checksum err!");
         char outputString[18]; // Buffer to store text in for LCD
-        sprintf(outputString, "%x ! %x", packet.checksum, packet.recalc_checksum);
+        // Display both the retrived (wrong) and recalculated (correct) checksum
+        sprintf(outputString, "%x ! %x", packet.checksum, packet.recalc_checksum); // Convert data to string
         put_string(0, 15, outputString);
       }
-      
       break;
     }
     case GUI_SAMPLED: {
@@ -412,7 +408,7 @@ void gui_update(gui_state_type_t state, packet_type_t packet) {
     }
   }
 
-  LL_mDelay(500000);  // Time for updating the LCD
+  LL_mDelay(500000);  // Time for updating the LCD (also joystick debounce timeout)
 }
 
 /* -------------------------------------------------- */
@@ -519,8 +515,8 @@ uint8_t joystick_down(void) {
 }
 
 /**
- * @brief Test whether the joystick down button is pressed
- * @return 1 if the joystick down is pressed, 0 otherwise
+ * @brief Test whether the joystick left button is pressed
+ * @return 1 if the joystick left is pressed, 0 otherwise
  */
 uint8_t joystick_left(void) {
   return (LL_GPIO_IsInputPinSet(GPIOC, LL_GPIO_PIN_1));
